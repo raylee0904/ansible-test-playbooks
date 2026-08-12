@@ -1,0 +1,59 @@
+---
+# package_updates.yml
+#
+# Reports pending APT updates and whether a reboot is required.
+# READ-ONLY -- it installs nothing.
+#
+# No extra_vars required.
+
+- name: Report pending package updates
+  hosts: all
+  gather_facts: true
+  connection: local
+
+  tasks:
+    - name: List upgradable packages
+      ansible.builtin.shell:
+        cmd: "apt list --upgradable 2>/dev/null | tail -n +2"
+      register: upgradable
+      changed_when: false
+      failed_when: false
+
+    - name: Extract package names
+      ansible.builtin.set_fact:
+        upgradable_packages: >-
+          {{ upgradable.stdout_lines | default([])
+             | map('regex_replace', '/.*$', '') | list }}
+
+    - name: Count security updates
+      ansible.builtin.set_fact:
+        security_count: >-
+          {{ upgradable.stdout_lines | default([])
+             | select('search', '-security') | list | length }}
+
+    - name: Check whether a reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_flag
+
+    - name: Report to the job log
+      ansible.builtin.debug:
+        msg: >-
+          {{ upgradable_packages | length }} updates pending
+          ({{ security_count }} security).
+          Reboot required: {{ reboot_flag.stat.exists }}
+
+    - name: Return structured results as job artifacts
+      ansible.builtin.set_stats:
+        data:
+          hostname: "{{ ansible_hostname }}"
+          os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+          updates_pending: "{{ upgradable_packages | length }}"
+          security_updates: "{{ security_count }}"
+          packages: "{{ upgradable_packages[:25] }}"
+          reboot_required: "{{ reboot_flag.stat.exists }}"
+          patch_verdict: >-
+            {{ 'action_needed'
+               if (security_count | int > 0 or reboot_flag.stat.exists)
+               else 'ok' }}
+        aggregate: false
