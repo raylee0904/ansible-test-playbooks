@@ -1,0 +1,33 @@
+---
+# echo.yml
+#
+# Simplest possible round-trip test for an MCP-driven agent:
+# the caller passes a message in, the playbook hands it back as a job artifact.
+#
+# AWX setup:
+#   Job Template -> check "Prompt on launch" for Variables (ask_variables_on_launch)
+#
+# Launch with extra_vars: {"message": "hello from the fleet agent"}
+# Read the result from the job's `artifacts` field.
+
+- name: Echo a message back as a job artifact
+  hosts: all
+  gather_facts: false
+  connection: local
+
+  vars:
+    message: "no message supplied"
+
+  tasks:
+    - name: Show what we received
+      ansible.builtin.debug:
+        msg: "Received: {{ message }}"
+
+    - name: Return it as a job artifact
+      ansible.builtin.set_stats:
+        data:
+          echoed_message: "{{ message }}"
+          message_length: "{{ message | length }}"
+          received_at: "{{ ansible_date_time.iso8601 | default(lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) }}"
+          status: "ok"
+        aggregate: false
