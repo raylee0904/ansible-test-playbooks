@@ -1,12 +1,21 @@
 ---
 # health_check.yml
 #
-# A realistic AIOps-shaped test: gather basic system health and return it as
-# structured job artifacts, so the agent gets usable data rather than raw
-# playbook output. Also sets a pass/fail verdict the agent can reason about.
+# Collects basic system health and returns it as structured job artifacts,
+# plus a pass/fail verdict the agent can reason about.
+#
+# NOTE ON WHAT IS MEASURED
+# With connection: local, AWX runs this inside its execution environment
+# container. Disk figures therefore describe the filesystem the EE sees, not
+# necessarily the EC2 host's root volume. Fine for a demo; for real host
+# metrics, target the host over SSH with a proper inventory and credential.
+#
+# Uses `df` rather than ansible_mounts: the mount list inside a container has
+# no '/' entry, which makes selectattr('mount','equalto','/') return an empty
+# sequence and abort the play.
 #
 # AWX setup:
-#   Job Template -> check "Prompt on launch" for Variables
+#   Job Template -> tick "Prompt on launch" next to Variables
 #
 # Optional extra_vars:
 #   {"disk_warn_percent": 80, "mem_warn_percent": 90}
@@ -19,18 +28,28 @@
   vars:
     disk_warn_percent: 85
     mem_warn_percent: 90
+    check_path: "/"
 
   tasks:
-    - name: Compute root filesystem usage
-      ansible.builtin.set_fact:
-        root_mount: >-
-          {{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}
+    - name: Read filesystem usage
+      ansible.builtin.command:
+        cmd: "df -Pk {{ check_path }}"
+      register: df_result
+      changed_when: false
 
-    - name: Derive usage percentages
+    - name: Parse df output
       ansible.builtin.set_fact:
-        disk_used_percent: >-
-          {{ (((root_mount.size_total - root_mount.size_available)
-               / root_mount.size_total) * 100) | round(1) }}
+        df_fields: "{{ df_result.stdout_lines[1].split() }}"
+
+    - name: Derive disk figures
+      ansible.builtin.set_fact:
+        filesystem: "{{ df_fields[0] }}"
+        disk_total_gb: "{{ (df_fields[1] | int / 1048576) | round(1) }}"
+        disk_free_gb: "{{ (df_fields[3] | int / 1048576) | round(1) }}"
+        disk_used_percent: "{{ df_fields[4] | regex_replace('%', '') | float }}"
+
+    - name: Derive memory usage
+      ansible.builtin.set_fact:
         mem_used_percent: >-
           {{ (((ansible_memtotal_mb - ansible_memfree_mb)
                / ansible_memtotal_mb) * 100) | round(1) }}
@@ -46,8 +65,9 @@
     - name: Report to the job log
       ansible.builtin.debug:
         msg: >-
-          {{ inventory_hostname }} is {{ health_verdict }} —
-          disk {{ disk_used_percent }}%, memory {{ mem_used_percent }}%
+          {{ inventory_hostname }} is {{ health_verdict }} --
+          disk {{ disk_used_percent }}% of {{ disk_total_gb }}GB,
+          memory {{ mem_used_percent }}%
 
     - name: Return structured health data as job artifacts
       ansible.builtin.set_stats:
@@ -56,10 +76,14 @@
           os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
           kernel: "{{ ansible_kernel }}"
           uptime_seconds: "{{ ansible_uptime_seconds | default('unknown') }}"
-          cpu_cores: "{{ ansible_processor_vcpus }}"
+          cpu_cores: "{{ ansible_processor_vcpus | default('unknown') }}"
           memory_total_mb: "{{ ansible_memtotal_mb }}"
           memory_used_percent: "{{ mem_used_percent }}"
-          disk_total_gb: "{{ (root_mount.size_total / 1073741824) | round(1) }}"
+          filesystem: "{{ filesystem }}"
+          disk_total_gb: "{{ disk_total_gb }}"
+          disk_free_gb: "{{ disk_free_gb }}"
           disk_used_percent: "{{ disk_used_percent }}"
+          disk_warn_threshold: "{{ disk_warn_percent }}"
+          mem_warn_threshold: "{{ mem_warn_percent }}"
           health_verdict: "{{ health_verdict }}"
         aggregate: false
