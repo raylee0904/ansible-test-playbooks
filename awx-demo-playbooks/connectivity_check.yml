@@ -1,0 +1,97 @@
+---
+# connectivity_check.yml
+#
+# Tests whether a target host is reachable: DNS resolution, TCP port, and
+# round-trip latency. Returns everything as job artifacts via set_stats so an
+# agent gets structured data rather than raw playbook output.
+#
+# Deliberately failure-tolerant: every check registers its result and continues,
+# so the playbook completes and reports a verdict instead of aborting on the
+# first failure. A failed check is data, not an error.
+#
+# AWX setup:
+#   Job Template -> tick "Prompt on launch" next to Variables
+#
+# extra_vars:
+#   {"target_host": "example.com", "target_port": 443}
+
+- name: Check connectivity to a target and return structured results
+  hosts: all
+  gather_facts: false
+  connection: local
+
+  vars:
+    target_host: "example.com"
+    target_port: 443
+    tcp_timeout: 5
+
+  tasks:
+    - name: Resolve DNS
+      ansible.builtin.command:
+        cmd: "getent hosts {{ target_host }}"
+      register: dns_result
+      changed_when: false
+      failed_when: false
+
+    - name: Record resolved address
+      ansible.builtin.set_fact:
+        dns_ok: "{{ dns_result.rc == 0 }}"
+        resolved_ip: >-
+          {{ (dns_result.stdout.split() | first)
+             if dns_result.rc == 0 else 'unresolved' }}
+
+    - name: Test TCP port
+      ansible.builtin.wait_for:
+        host: "{{ target_host }}"
+        port: "{{ target_port }}"
+        timeout: "{{ tcp_timeout }}"
+        state: started
+      register: tcp_result
+      failed_when: false
+      when: dns_ok
+
+    - name: Record TCP result
+      ansible.builtin.set_fact:
+        tcp_ok: "{{ dns_ok and not (tcp_result.failed | default(true)) }}"
+        tcp_elapsed: "{{ tcp_result.elapsed | default(0) }}"
+
+    - name: Measure ICMP round trip
+      ansible.builtin.command:
+        cmd: "ping -c 3 -W 2 {{ target_host }}"
+      register: ping_result
+      changed_when: false
+      failed_when: false
+      when: dns_ok
+
+    - name: Parse average latency
+      ansible.builtin.set_fact:
+        icmp_ok: "{{ dns_ok and (ping_result.rc | default(1)) == 0 }}"
+        avg_latency_ms: >-
+          {{ (ping_result.stdout | default('') | regex_search('= [\d.]+/([\d.]+)/', '\\1') | first)
+             if (ping_result.rc | default(1)) == 0 else 'n/a' }}
+
+    - name: Determine verdict
+      ansible.builtin.set_fact:
+        connectivity_verdict: >-
+          {{ 'reachable' if tcp_ok
+             else ('dns_failure' if not dns_ok else 'port_unreachable') }}
+
+    - name: Report to the job log
+      ansible.builtin.debug:
+        msg: >-
+          {{ target_host }}:{{ target_port }} -> {{ connectivity_verdict }}
+          (dns={{ dns_ok }}, tcp={{ tcp_ok }}, icmp={{ icmp_ok }})
+
+    - name: Return structured results as job artifacts
+      ansible.builtin.set_stats:
+        data:
+          target_host: "{{ target_host }}"
+          target_port: "{{ target_port }}"
+          dns_resolved: "{{ dns_ok }}"
+          resolved_ip: "{{ resolved_ip }}"
+          tcp_reachable: "{{ tcp_ok }}"
+          tcp_connect_seconds: "{{ tcp_elapsed }}"
+          icmp_reachable: "{{ icmp_ok }}"
+          avg_latency_ms: "{{ avg_latency_ms }}"
+          connectivity_verdict: "{{ connectivity_verdict }}"
+        aggregate: false
