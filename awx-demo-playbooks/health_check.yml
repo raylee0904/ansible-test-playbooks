@@ -48,6 +48,28 @@
         disk_free_gb: "{{ (df_fields[3] | int / 1048576) | round(1) }}"
         disk_used_percent: "{{ df_fields[4] | regex_replace('%', '') | float }}"
 
+    - name: Enumerate all real filesystems
+      ansible.builtin.shell:
+        cmd: >-
+          df -PkT | awk 'NR>1 && $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay)$/ || NR==2'
+      register: df_all
+      changed_when: false
+      failed_when: false
+
+    - name: Build a per-filesystem breakdown
+      ansible.builtin.set_fact:
+        filesystems: >-
+          {{ filesystems | default([]) + [{
+               'device':       (item.split()[0]),
+               'type':         (item.split()[1]),
+               'mount':        (item.split()[6]),
+               'total_gb':     ((item.split()[2] | int / 1048576) | round(1)),
+               'free_gb':      ((item.split()[4] | int / 1048576) | round(1)),
+               'used_percent': (item.split()[5] | regex_replace('%', '') | float)
+             }] }}
+      loop: "{{ df_all.stdout_lines | default([]) }}"
+      when: item.split() | length >= 7
+
     - name: Derive memory usage
       ansible.builtin.set_fact:
         mem_used_percent: >-
@@ -83,6 +105,7 @@
           disk_total_gb: "{{ disk_total_gb }}"
           disk_free_gb: "{{ disk_free_gb }}"
           disk_used_percent: "{{ disk_used_percent }}"
+          filesystems: "{{ filesystems | default([]) }}"
           disk_warn_threshold: "{{ disk_warn_percent }}"
           mem_warn_threshold: "{{ mem_warn_percent }}"
           health_verdict: "{{ health_verdict }}"
