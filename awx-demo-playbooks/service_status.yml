@@ -1,0 +1,62 @@
+---
+# service_status.yml
+#
+# Reports the state of a named list of systemd services. Read-only.
+#
+# AWX setup:
+#   Job Template -> tick "Prompt on launch" next to Variables
+#
+# extra_vars:
+#   {"services_to_check": ["ssh", "cron", "k3s"]}
+
+- name: Report status of specified services
+  hosts: all
+  gather_facts: true
+  connection: local
+
+  vars:
+    services_to_check:
+      - ssh
+      - cron
+
+  tasks:
+    - name: Collect service facts
+      ansible.builtin.service_facts:
+
+    - name: Build a status entry for each requested service
+      ansible.builtin.set_fact:
+        service_report: >-
+          {{ service_report | default({}) | combine({
+               item: {
+                 'state':  (ansible_facts.services[item + '.service'].state
+                            | default(ansible_facts.services[item].state
+                            | default('not_found'))),
+                 'status': (ansible_facts.services[item + '.service'].status
+                            | default(ansible_facts.services[item].status
+                            | default('unknown')))
+               }
+             }) }}
+      loop: "{{ services_to_check }}"
+
+    - name: Count services that are not running
+      ansible.builtin.set_fact:
+        not_running: >-
+          {{ service_report | dict2items
+             | rejectattr('value.state', 'equalto', 'running')
+             | map(attribute='key') | list }}
+
+    - name: Report to the job log
+      ansible.builtin.debug:
+        msg: >-
+          Checked {{ services_to_check | length }} services;
+          {{ not_running | length }} not running.
+
+    - name: Return structured results as job artifacts
+      ansible.builtin.set_stats:
+        data:
+          hostname: "{{ ansible_hostname }}"
+          services_checked: "{{ services_to_check | length }}"
+          services: "{{ service_report }}"
+          not_running: "{{ not_running }}"
+          service_verdict: "{{ 'ok' if (not_running | length) == 0 else 'degraded' }}"
+        aggregate: false
