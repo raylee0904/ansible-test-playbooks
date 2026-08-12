@@ -36,16 +36,23 @@
              | map('split', '\t') | list
              | map('list') | list }}
 
-    - name: Compute root filesystem usage
+    # df rather than ansible_mounts: inside an execution environment container
+    # the mount list has no '/' entry, so selectattr(...) | first aborts the play.
+    - name: Read filesystem usage
+      ansible.builtin.command:
+        cmd: "df -Pk /"
+      register: df_result
+      changed_when: false
+
+    - name: Derive usage figures
       ansible.builtin.set_fact:
-        root_mount: >-
-          {{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}
+        df_fields: "{{ df_result.stdout_lines[1].split() }}"
 
     - name: Derive usage percentage
       ansible.builtin.set_fact:
-        disk_used_percent: >-
-          {{ (((root_mount.size_total - root_mount.size_available)
-               / root_mount.size_total) * 100) | round(1) }}
+        disk_total_gb: "{{ (df_fields[1] | int / 1048576) | round(1) }}"
+        disk_free_gb: "{{ (df_fields[3] | int / 1048576) | round(1) }}"
+        disk_used_percent: "{{ df_fields[4] | regex_replace('%', '') | float }}"
 
     - name: Report to the job log
       ansible.builtin.debug:
@@ -59,8 +66,8 @@
         data:
           hostname: "{{ ansible_hostname }}"
           scan_path: "{{ scan_path }}"
-          disk_total_gb: "{{ (root_mount.size_total / 1073741824) | round(1) }}"
-          disk_free_gb: "{{ (root_mount.size_available / 1073741824) | round(1) }}"
+          disk_total_gb: "{{ disk_total_gb }}"
+          disk_free_gb: "{{ disk_free_gb }}"
           disk_used_percent: "{{ disk_used_percent }}"
           largest_dirs_mb: "{{ du_result.stdout_lines | default([]) }}"
           scan_succeeded: "{{ du_result.rc == 0 }}"
