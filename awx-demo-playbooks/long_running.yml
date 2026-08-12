@@ -1,0 +1,40 @@
+---
+# long_running.yml
+#
+# Sleeps for a configurable duration, then returns. Exists purely to test
+# agent behaviour around long jobs -- specifically that the agent launches
+# with wait=false and polls get_job, rather than blocking.
+#
+# Set duration_seconds above 60 to prove the CloudFront origin timeout does
+# NOT break the workflow when the agent polls correctly.
+#
+# AWX setup:
+#   Job Template -> tick "Prompt on launch" next to Variables
+#
+# extra_vars:
+#   {"duration_seconds": 90}
+
+- name: Run for a configurable duration
+  hosts: all
+  gather_facts: false
+  connection: local
+
+  vars:
+    duration_seconds: 30
+
+  tasks:
+    - name: Announce start
+      ansible.builtin.debug:
+        msg: "Sleeping for {{ duration_seconds }} seconds."
+
+    - name: Sleep
+      ansible.builtin.pause:
+        seconds: "{{ duration_seconds | int }}"
+
+    - name: Return structured results as job artifacts
+      ansible.builtin.set_stats:
+        data:
+          duration_seconds: "{{ duration_seconds }}"
+          completed: "true"
+          note: "Long-running job finished. Agent should have polled rather than waited."
+        aggregate: false
