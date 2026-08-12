@@ -1,0 +1,67 @@
+---
+# disk_report.yml
+#
+# Reports the largest directories under a given path, plus filesystem usage.
+# READ-ONLY -- it identifies cleanup candidates but deletes nothing.
+#
+# AWX setup:
+#   Job Template -> tick "Prompt on launch" next to Variables
+#
+# extra_vars:
+#   {"scan_path": "/var", "top_n": 10}
+
+- name: Report disk usage and largest directories
+  hosts: all
+  gather_facts: true
+  connection: local
+
+  vars:
+    scan_path: "/var"
+    top_n: 10
+
+  tasks:
+    - name: Measure directory sizes
+      ansible.builtin.shell:
+        cmd: >-
+          du -xm --max-depth=1 {{ scan_path }} 2>/dev/null
+          | sort -rn | head -n {{ top_n | int + 1 }}
+      register: du_result
+      changed_when: false
+      failed_when: false
+
+    - name: Parse into name/size pairs
+      ansible.builtin.set_fact:
+        largest_dirs: >-
+          {{ du_result.stdout_lines | default([])
+             | map('split', '\t') | list
+             | map('list') | list }}
+
+    - name: Compute root filesystem usage
+      ansible.builtin.set_fact:
+        root_mount: >-
+          {{ ansible_mounts | selectattr('mount', 'equalto', '/') | first }}
+
+    - name: Derive usage percentage
+      ansible.builtin.set_fact:
+        disk_used_percent: >-
+          {{ (((root_mount.size_total - root_mount.size_available)
+               / root_mount.size_total) * 100) | round(1) }}
+
+    - name: Report to the job log
+      ansible.builtin.debug:
+        msg: >-
+          Root filesystem {{ disk_used_percent }}% used.
+          Largest paths under {{ scan_path }}:
+          {{ du_result.stdout_lines | default([]) | join(' | ') }}
+
+    - name: Return structured results as job artifacts
+      ansible.builtin.set_stats:
+        data:
+          hostname: "{{ ansible_hostname }}"
+          scan_path: "{{ scan_path }}"
+          disk_total_gb: "{{ (root_mount.size_total / 1073741824) | round(1) }}"
+          disk_free_gb: "{{ (root_mount.size_available / 1073741824) | round(1) }}"
+          disk_used_percent: "{{ disk_used_percent }}"
+          largest_dirs_mb: "{{ du_result.stdout_lines | default([]) }}"
+          scan_succeeded: "{{ du_result.rc == 0 }}"
+        aggregate: false
