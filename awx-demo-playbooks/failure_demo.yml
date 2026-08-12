@@ -1,0 +1,53 @@
+---
+# failure_demo.yml
+#
+# Fails on purpose, in a selectable way. Exists to test the agent's error
+# path: does it call get_job_stdout, read the real Ansible error, and report
+# it accurately instead of inventing a cause or silently retrying?
+#
+# AWX setup:
+#   Job Template -> tick "Prompt on launch" next to Variables
+#
+# extra_vars:
+#   {"failure_mode": "command"}   # command | missing_file | undefined_var | none
+
+- name: Fail in a controlled, selectable way
+  hosts: all
+  gather_facts: false
+  connection: local
+
+  vars:
+    failure_mode: "command"
+
+  tasks:
+    - name: Announce the intended failure mode
+      ansible.builtin.debug:
+        msg: "Failure mode: {{ failure_mode }}"
+
+    - name: Fail via a non-zero command exit
+      ansible.builtin.command:
+        cmd: "/bin/false"
+      when: failure_mode == "command"
+      changed_when: false
+
+    - name: Fail by reading a file that does not exist
+      ansible.builtin.slurp:
+        src: "/etc/this-file-does-not-exist.conf"
+      when: failure_mode == "missing_file"
+
+    - name: Fail on an undefined variable
+      ansible.builtin.debug:
+        msg: "{{ a_variable_that_was_never_defined }}"
+      when: failure_mode == "undefined_var"
+
+    - name: Succeed instead
+      ansible.builtin.debug:
+        msg: "failure_mode was 'none', so this run succeeds."
+      when: failure_mode == "none"
+
+    - name: Return artifacts (only reached when failure_mode is none)
+      ansible.builtin.set_stats:
+        data:
+          failure_mode: "{{ failure_mode }}"
+          outcome: "succeeded"
+        aggregate: false
